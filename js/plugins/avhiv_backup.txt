@@ -1,0 +1,634 @@
+/*:
+ * @target MZ
+ * @plugindesc System osiągnięć z menu i PS5-style popupem (tytuł + opis + ikona + dźwięk). Kompatybilny z VisuStella, bez CGMZ Core.
+ * @author Code
+ *
+ * @command EarnAchievement
+ * @text Earn Achievement
+ * @desc Odblokowuje osiągnięcie o wybranym ID
+ *
+ * @arg achievementId
+ * @text Achievement ID
+ * @desc ID osiągnięcia, które ma zostać odblokowane
+ * @type combo
+ *
+ * @param Achievements
+ * @type struct<Achievement>[]
+ * @desc Lista osiągnięć dostępnych w grze
+ * @default []
+ *
+ * @param PopupPosition
+ * @type select
+ * @text Pozycja popupu
+ * @default BottomRight
+ * @option TopLeft
+ * @option TopCenter
+ * @option TopRight
+ * @option BottomLeft
+ * @option BottomCenter
+ * @option BottomRight
+ *
+ * @param PopupWidth
+ * @type number
+ * @default 520
+ *
+ * @param PopupHeight
+ * @type number
+ * @default 120
+ *
+ * @param IconTextPadding
+ * @type number
+ * @default 16
+ *
+ * @param TitleFontSize
+ * @type number
+ * @default 22
+ *
+ * @param DescFontSize
+ * @type number
+ * @default 16
+ *
+ * @param TitleOffsetY
+ * @type number
+ * @default 10
+ *
+ * @param DescOffsetY
+ * @type number
+ * @default 28
+ *
+ * @param PopupSE
+ * @type struct<Sound>
+ * @default {"name":"Item3","volume":"90","pitch":"100","pan":"0"}
+ * 
+ * @param RewardPopupPosition
+ * @type select
+ * @text Pozycja popupu nagrody
+ * @default BottomLeft
+ * @option TopLeft
+ * @option TopCenter
+ * @option TopRight
+ * @option BottomLeft
+ * @option BottomCenter
+ * @option BottomRight
+ * 
+ * @param RewardPopupDelay
+ * @type number
+ * @text Opóźnienie popupu nagrody (ms)
+ * @default 3000
+ * @min 0
+ * 
+ * 
+ * 
+ * 
+ *
+ * @help
+ * 🔹 $gameSystem.earnAchievement("id")
+ * 🔹 Plugin Command: Earn Achievement
+ * 🔹 PS5-style popup: ikona + tytuł + opis + dźwięk SE
+ */
+
+/*~struct~Achievement:
+ * @param id
+ * @desc Unique achievement ID
+ *
+ * @param name
+ * @desc Title of the achievement
+ *
+ * @param description
+ * @desc Description of the achievement
+ *
+ * @param iconImage
+ * @type file
+ * @dir img/pictures
+ * @desc Icon file name (e.g., trophy.png)
+ *
+ * @param goldReward
+ * @type number
+ * @min 0
+ * @desc Gold reward (optional)
+ * @default 0
+ *
+ * @param itemReward
+ * @type item
+ * @desc Optional item reward
+ *
+ * @param weaponReward
+ * @type weapon
+ * @desc Optional weapon reward
+ *
+ * @param armorReward
+ * @type armor
+ * @desc Optional armor reward
+ *
+ * @param expReward
+ * @type number
+ * @min 0
+ * @desc Experience reward (leader only)
+ * @default 0
+ * 
+ * @param lockedIconImage
+ * @type file
+ * @dir img/pictures
+ * @desc Opcjonalna ikona dla zablokowanego osiągnięcia (48x48)
+ */
+
+
+
+
+
+/*~struct~Sound:
+ * @param name
+ * @type file
+ * @dir audio/se/
+ * @param volume
+ * @type number
+ * @default 90
+ * @param pitch
+ * @type number
+ * @default 100
+ * @param pan
+ * @type number
+ * @default 0
+ */
+
+(() => {
+    const pluginName = "Achiv";
+    const parameters = PluginManager.parameters(pluginName);
+
+    const popupPosition = String(parameters["PopupPosition"] || "BottomRight");
+    const rewardPopupPosition = String(parameters["RewardPopupPosition"] || "BottomLeft");
+    const rewardPopupDelay = Number(parameters["RewardPopupDelay"] || 3000);
+    const popupWidth = Number(parameters["PopupWidth"] || 520);
+    const popupHeight = Number(parameters["PopupHeight"] || 120);
+    const iconTextPadding = Number(parameters["IconTextPadding"] || 16);
+    const titleFontSize = Number(parameters["TitleFontSize"] || 22);
+    const descFontSize = Number(parameters["DescFontSize"] || 16);
+    const titleOffsetY = Number(parameters["TitleOffsetY"] || 10);
+    const descOffsetY = Number(parameters["DescOffsetY"] || 28);
+
+    const popupSE = JSON.parse(parameters["PopupSE"] || "{}");
+    const seData = {
+        name: popupSE.name || "",
+        volume: Number(popupSE.volume || 90),
+        pitch: Number(popupSE.pitch || 100),
+        pan: Number(popupSE.pan || 0),
+    };
+
+    const rawList = JSON.parse(parameters["Achievements"] || "[]");
+    const Achievements = rawList.map(str => {
+        try {
+            const obj = JSON.parse(str);
+            return {
+                id: obj.id?.trim() || "",
+                name: obj.name?.trim() || "",
+                description: obj.description?.trim() || "",
+                iconImage: obj.iconImage?.trim() || "",
+                goldReward: Number(obj.goldReward || 0),
+                itemReward: obj.itemReward ? Number(obj.itemReward) : null,
+                weaponReward: obj.weaponReward ? Number(obj.weaponReward) : null,
+                armorReward: obj.armorReward ? Number(obj.armorReward) : null,
+                expReward: Number(obj.expReward || 0),
+                secret: obj.secret === "true",
+                lockedIconImage: obj.lockedIconImage?.trim() || "",
+            };
+            
+        } catch (e) {
+            console.warn("Nieprawidłowy wpis w osiągnięciach:", str);
+            return null;
+        }
+    }).filter(Boolean);
+
+    PluginManager.registerCommand(pluginName, "EarnAchievement", args => {
+        const id = args.achievementId;
+        if (id) $gameSystem.earnAchievement(id);
+    });
+
+    const _Game_System_initialize = Game_System.prototype.initialize;
+    Game_System.prototype.initialize = function () {
+        _Game_System_initialize.call(this);
+        this._earnedAchievements = [];
+    };
+
+    Game_System.prototype.earnAchievement = function (id) {
+        if (!this._earnedAchievements.includes(id)) {
+            this._earnedAchievements.push(id);
+            const data = Achievements.find(a => a.id === id);
+            if (data) {
+                if (data.goldReward > 0) $gameParty.gainGold(data.goldReward);
+                if (data.itemReward) $gameParty.gainItem($dataItems[data.itemReward], 1);
+                if (data.weaponReward) $gameParty.gainItem($dataWeapons[data.weaponReward], 1);
+                if (data.armorReward) $gameParty.gainItem($dataArmors[data.armorReward], 1);
+                if (data.expReward > 0) $gameParty.leader()?.gainExp(data.expReward);
+
+                if (SceneManager._scene?.addChild) {
+                    const popup = new Window_AchievementPopup(data.name, data.iconImage, data.description);
+                    SceneManager._scene.addChild(popup);
+                    if (data.goldReward > 0) {
+                        setTimeout(() => {
+                            const rewards = [];
+                        
+                            if (data.goldReward > 0) rewards.push({ text: `+${data.goldReward} Gold`, icon: "IconSet", index: 315 });
+                            if (data.itemReward) {
+                                const item = $dataItems[data.itemReward];
+                                if (item) rewards.push({ text: ` ${item.name}`, icon: "IconSet", index: item.iconIndex });
+                            }
+                            if (data.weaponReward) {
+                                const weapon = $dataWeapons[data.weaponReward];
+                                if (weapon) rewards.push({ text: ` ${weapon.name}`, icon: "IconSet", index: weapon.iconIndex });
+                            }
+                            if (data.armorReward) {
+                                const armor = $dataArmors[data.armorReward];
+                                if (armor) rewards.push({ text: ` ${armor.name}`, icon: "IconSet", index: armor.iconIndex });
+                            }
+                            if (data.expReward > 0) rewards.push({ text: `+${data.expReward} EXP`, icon: "IconSet", index: 79 });
+                        
+                            if (rewards.length > 0) {
+                                const rewardPopup = new Window_RewardPopup(rewards);
+                                SceneManager._scene.addChild(rewardPopup);
+                            }
+                        }, 3000);
+                        
+                    }
+                    
+                    if (seData.name) AudioManager.playSe(seData);
+                }
+                console.log(`🏆 Zdobyto osiągnięcie: ${data.name}`);
+            }
+        }
+    };
+
+    Game_System.prototype.hasAchievement = function (id) {
+        return this._earnedAchievements.includes(id);
+    };
+
+    Game_System.prototype.getAchievements = function () {
+        return Achievements;
+    };
+
+    const _Window_MenuCommand_addOriginalCommands = Window_MenuCommand.prototype.addOriginalCommands;
+    Window_MenuCommand.prototype.addOriginalCommands = function () {
+        _Window_MenuCommand_addOriginalCommands.call(this);
+        this.addCommand("Achievements", "achievements");
+    };
+
+    const _Scene_Menu_createCommandWindow = Scene_Menu.prototype.createCommandWindow;
+    Scene_Menu.prototype.createCommandWindow = function () {
+        _Scene_Menu_createCommandWindow.call(this);
+        this._commandWindow.setHandler("achievements", () => {
+            SceneManager.push(Scene_Achievements);
+        });
+    };
+
+    class Scene_Achievements extends Scene_MenuBase {
+        create() {
+            super.create();
+
+            const rewardHeight = 250;
+            const listHeight = Graphics.boxHeight - rewardHeight - 45; // odejmujemy miejsce na nowy pasek
+
+            const listRect = new Rectangle(0, 0, Graphics.boxWidth, listHeight);
+            const rewardRect = new Rectangle(0, listHeight, Graphics.boxWidth, rewardHeight);
+            const counterRect = new Rectangle(0, rewardRect.y + rewardRect.height, Graphics.boxWidth, 55);
+            this._counterWindow = new Window_AchievementCounter(counterRect);
+            this.addWindow(this._counterWindow);
+
+
+
+            this._achievementWindow = new Window_AchievementList(listRect);
+            this._rewardWindow = new Window_AchievementReward(rewardRect);
+
+            this._achievementWindow.setHandler("cancel", this.popScene.bind(this));
+            this._achievementWindow.setRewardWindow(this._rewardWindow);
+
+            this.addWindow(this._achievementWindow);
+            this.addWindow(this._rewardWindow);
+
+            this._achievementWindow.activate();
+            this._achievementWindow.select(0);
+        }
+    }
+
+    class Window_AchievementList extends Window_Selectable {
+        initialize(rect) {
+            super.initialize(rect);
+            this._data = $gameSystem.getAchievements() || [];
+            this.refresh();
+            this.select(0);
+            this.activate();
+        }
+
+        maxItems() {
+            return this._data.length;
+        }
+
+        itemHeight() {
+            return 80;
+        }
+
+        drawItem(index) {
+            const achievement = this._data[index];
+            if (!achievement) return;
+
+            const rect = this.itemRectWithPadding(index);
+            const earned = $gameSystem.hasAchievement(achievement.id);
+            const iconSize = 48;
+            const iconX = rect.x + 20;
+            const iconY = rect.y + (rect.height - iconSize) / 2;
+
+            const textX = iconX + iconSize + 12;
+            const textW = rect.width - textX - 8;
+            const textY = rect.y + (rect.height - 40) / 2;
+
+            const name = earned || !achievement.secret ? achievement.name : "???";
+
+            let icon = earned ? achievement.iconImage : achievement.lockedIconImage;
+
+
+            if (this.index() === index) {
+                this.contentsBack.fillRect(rect.x, rect.y, rect.width, rect.height, 'rgba(255,255,255,0.1)');
+            }
+
+            if (icon) {
+                const bitmap = ImageManager.loadPicture(icon);
+                bitmap.addLoadListener(() => {
+                    this.contents.blt(bitmap, 0, 0, iconSize, iconSize, iconX, iconY);
+                });
+            }
+
+            this.contents.paintOpacity = 255;
+            this.changeTextColor(earned ? "#ffffff" : "#666666");
+            this.contents.fontSize = 20;
+            this.drawText(name, textX, textY, textW, "left");
+            this.resetTextColor();
+        }
+
+
+        refresh() {
+            this.contents.clear();
+            this.contentsBack.clear();
+            this._data = $gameSystem.getAchievements() || [];
+            this.drawAllItems();
+        }
+
+        setRewardWindow(rewardWindow) {
+            this._rewardWindow = rewardWindow;
+            this.refreshRewardWindow();
+        }
+
+        refreshRewardWindow() {
+            const index = this.index();
+            if (index < 0 || index >= this._data.length) return;
+            const achievement = this._data[index];
+            if (this._rewardWindow) {
+                this._rewardWindow.setAchievement(achievement);
+            }
+        }
+
+        select(index) {
+            super.select(index);
+            this.refreshRewardWindow();
+        }
+    }
+
+    class Window_AchievementReward extends Window_Base {
+        constructor(rect) {
+            super(rect);
+            this._achievement = null;
+        }
+
+        setAchievement(achievement) {
+            if (this._achievement !== achievement) {
+                this._achievement = achievement;
+                this.refresh();
+            }
+        }
+
+        refresh() {
+            this.contents.clear();
+            if (!this._achievement) return;
+        
+            const earned = $gameSystem.hasAchievement(this._achievement.id);
+            const name = earned || !this._achievement.secret ? this._achievement.name : "???";
+            const desc = earned || !this._achievement.secret ? this._achievement.description : "";
+        
+            const gold = this._achievement.goldReward || 0;
+            const item = this._achievement.itemReward ? $dataItems[this._achievement.itemReward] : null;
+            const weapon = this._achievement.weaponReward ? $dataWeapons[this._achievement.weaponReward] : null;
+            const armor = this._achievement.armorReward ? $dataArmors[this._achievement.armorReward] : null;
+            const exp = this._achievement.expReward || 0;
+        
+            // Ustaw kolor tekstu
+            const textColor = earned ? "#ffffff" : "#666666";
+            this.changeTextColor(textColor);
+        
+            let y = 0;
+            this.contents.fontSize = 18;
+            this.drawText(`🏆 ${name}`, 0, y, this.contents.width, "left");
+            y += 32;
+        
+            this.contents.fontSize = 14;
+            this.drawText(desc, 0, y, this.contents.width, "left");
+            y += 32;
+        
+            this.contents.fontSize = 16;
+            this.drawText("Reward:", 0, y, this.contents.width, "left");
+            y += 24;
+        
+            if (gold > 0) {
+                this.drawText(`💰 ${gold} gold`, 0, y, this.contents.width, "left");
+                y += 24;
+            }
+        
+            if (item) {
+                this.drawText(`🎁 ${item.name}`, 0, y, this.contents.width, "left");
+                y += 24;
+            }
+        
+            if (weapon) {
+                this.drawText(`🗡️ ${weapon.name}`, 0, y, this.contents.width, "left");
+                y += 24;
+            }
+        
+            if (armor) {
+                this.drawText(`🛡️ ${armor.name}`, 0, y, this.contents.width, "left");
+                y += 24;
+            }
+        
+            if (exp > 0) {
+                this.drawText(`⭐ ${exp} EXP`, 0, y, this.contents.width, "left");
+            }
+        
+            this.resetTextColor();
+        }
+        
+        
+        
+        
+        
+    }
+    class Window_AchievementCounter extends Window_Base {
+        constructor(rect) {
+            super(rect);
+            this.refresh();
+        }
+    
+        refresh() {
+            this.contents.clear();
+    
+            const total = $gameSystem.getAchievements().length;
+            const unlocked = $gameSystem._earnedAchievements.length;
+            const text = `Achievements: ${unlocked} / ${total} unlocked`;
+    
+            this.contents.fontSize = 18;
+            this.changeTextColor("#ffffff");
+            this.drawText(text, 0, 0, this.contents.width, "center");
+            this.resetTextColor();
+        }
+    }
+    
+
+
+
+
+
+
+    class Window_AchievementPopup extends Window_Selectable {
+        constructor(title, iconImage, description = "") {
+            const width = Math.min(popupWidth, Graphics.boxWidth - 40);
+            const height = popupHeight;
+            const pos = Window_AchievementPopup.calcPosition(width, height);
+            super(new Rectangle(pos.x, pos.y, width, height));
+
+            this._title = title;
+            this._description = description;
+            this._iconImage = iconImage;
+            this._iconBitmap = iconImage ? ImageManager.loadPicture(iconImage) : null;
+            this._duration = 300;
+            this.opacity = 0;
+            this.backOpacity = 180;
+            this.open();
+        }
+
+        static calcPosition(width, height) {
+            const pad = 20;
+            const xRight = Graphics.boxWidth - width - pad;
+            const yBottom = Graphics.boxHeight - height - pad;
+            const xCenter = (Graphics.boxWidth - width) / 2;
+            const yTop = pad;
+
+            switch (popupPosition) {
+                case "TopLeft": return { x: pad, y: yTop };
+                case "TopCenter": return { x: xCenter + 150, y: yTop };
+                case "TopRight": return { x: xRight, y: yTop };
+                case "BottomLeft": return { x: pad, y: yBottom };
+                case "BottomCenter": return { x: xCenter, y: yBottom };
+                default: return { x: xRight, y: yBottom };
+            }
+        }
+
+        update() {
+            super.update();
+            this._duration--;
+            this.opacity = Math.min(255, this.opacity + 15);
+            if (this._duration <= 0) {
+                this.close();
+                if (this.parent) {
+                    this.parent.removeChild(this);
+                }
+            }
+        }
+
+        open() {
+            super.open();
+            this.refresh();
+        }
+
+        refresh() {
+            this.contents.clear();
+
+            const iconSize = 64;
+            const iconX = 0;
+            const iconY = (this.contentsHeight() - iconSize) / 2;
+            const textX = iconX + iconSize + iconTextPadding;
+            const textW = this.contents.width - textX - 16;
+
+            if (this._iconBitmap && this._iconBitmap.isReady()) {
+                this.contents.blt(this._iconBitmap, -10, 0, iconSize, iconSize, iconX, iconY - 15);
+            } else {
+                this._iconBitmap?.addLoadListener(() => this.refresh());
+            }
+
+            this.contents.fontSize = titleFontSize;
+            this.drawText(this._title, textX, titleOffsetY, textW, "left");
+
+            if (this._description) {
+                this.contents.fontSize = descFontSize;
+                this.drawText(this._description, textX, descOffsetY, textW, "left");
+            }
+        }
+    }
+
+    class Window_RewardPopup extends Window_Base {
+        constructor(rewards) {
+            const width = Math.min(popupWidth, Graphics.boxWidth - 40);
+            const height = 80;
+            const pos = Window_RewardPopup.calcPosition(width, height);
+            super(new Rectangle(pos.x + 350, pos.y, width, height));
+    
+            this._rewards = rewards;
+            this._currentIndex = 0;
+    
+            this.opacity = 255;
+            this.backOpacity = 180;
+            this.frameVisible = true;
+    
+            this._interval = null;
+            this._startSequence();
+        }
+    
+        static calcPosition(width, height) {
+            const pad = 20;
+            const x = pad;
+            const y = Graphics.boxHeight - height - pad;
+            return { x, y };
+        }
+    
+        _startSequence() {
+            this._showReward(this._rewards[this._currentIndex]);
+    
+            this._interval = setInterval(() => {
+                this._currentIndex++;
+                if (this._currentIndex >= this._rewards.length) {
+                    clearInterval(this._interval);
+                    this.close();
+                    if (this.parent) {
+                        this.parent.removeChild(this);
+                    }
+                } else {
+                    this._showReward(this._rewards[this._currentIndex]);
+                }
+            }, 3000);
+        }
+    
+        _showReward(reward) {
+            this._text = reward.text;
+            this.refresh();
+        }
+    
+        refresh() {
+            this.contents.clear();
+            this.contents.fontSize = 20;
+    
+            const textY = (this.contentsHeight() - this.lineHeight()) / 2;
+            this.drawText(this._text, 0, textY, this.contents.width, "center");
+        }
+    }
+    
+    
+
+
+
+
+    
+
+})();

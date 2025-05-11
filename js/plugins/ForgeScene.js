@@ -1,0 +1,411 @@
+/*:
+ * @target MZ
+ * @plugindesc [v1.0] Pełna scena ulepszania broni/pancerzy z kosztami złota i podglądem. Autor: Łukasz
+ * @author Łukasz
+ *
+ * @command OpenForge
+ * @text Otwórz kuźnię
+ * @desc Otwiera scenę ulepszania.
+ */
+
+(() => {
+  const pluginName = "ForgeScene";
+
+  PluginManager.registerCommand(pluginName, "OpenForge", () => {
+    SceneManager.push(Scene_Forge);
+  });
+
+  class Scene_Forge extends Scene_MenuBase {
+    create() {
+      super.create();
+      this.createHelpWindow();
+      this.createCategoryWindow();
+      this.createInfoWindow();
+      this.createConfirmWindow();
+    }
+
+    createHelpWindow() {
+      const rect = new Rectangle(0, 0, Graphics.boxWidth, 60);
+      this._helpWindow = new Window_Help(rect);
+      this._helpWindow.setText("Choose equipment to upgrade");
+      this.addWindow(this._helpWindow);
+    }
+
+    createCategoryWindow() {
+      const wy = this._helpWindow.height;
+      const wh = Graphics.boxHeight - wy - 85;
+      const rect = new Rectangle(0, wy, Graphics.boxWidth / 2, wh);
+      this._itemWindow = new Window_ForgeCategoryList(rect);
+      this._itemWindow.setHandler("ok", this.onItemOk.bind(this));
+      this._itemWindow.setHandler("cancel", this.popScene.bind(this));
+      this._itemWindow.activate();
+      this.addWindow(this._itemWindow);
+    }
+
+    createInfoWindow() {
+      const wy = this._helpWindow.height;
+      const wh = Graphics.boxHeight - wy - 85;
+      const rect = new Rectangle(Graphics.boxWidth / 2, wy, Graphics.boxWidth / 2, wh);
+      this._infoWindow = new Window_ForgeInfo(rect);
+      this.addWindow(this._infoWindow);
+      this._itemWindow.setInfoWindow(this._infoWindow);
+    }
+
+    createConfirmWindow() {
+      const rect = new Rectangle(0, Graphics.boxHeight - 88, Graphics.boxWidth, 55);
+      this._confirmWindow = new Window_Help(rect);
+      this._confirmWindow.setText("");
+      this.addWindow(this._confirmWindow);
+    }
+
+    onItemOk() {
+      const item = this._itemWindow.item();
+      if (!item) {
+        this._confirmWindow.setText("Error: No item selected.");
+        SoundManager.playBuzzer();
+        this._itemWindow.activate();
+        return;
+      }
+
+      const level = this.getUpgradeLevel(item);
+      const cost = this.getUpgradeCost(item, level + 1);
+      const gold = $gameParty.gold();
+
+      if (gold < cost) {
+        SoundManager.playBuzzer();
+        this._confirmWindow.setText("Requirements not met!");
+        this._itemWindow.activate();
+        return;
+      }
+
+      const requiredItems = this.getUpgradeItems(item, level + 1);
+      for (const req of requiredItems) {
+        if ($gameParty.numItems($dataItems[req.id]) < req.amount) {
+          this._confirmWindow.setText("Missing item: " + $dataItems[req.id].name);
+          SoundManager.playBuzzer();
+          this._itemWindow.activate(); // 🛠️ TO DODAJ!
+          return;
+        }
+        
+      }
+
+      const baseName = item.name.replace(/\s\+\d+$/, "");
+      const newName = `${baseName} +${level + 1}`;
+
+      if (!item.meta.upgradeLevel) item.meta.upgradeLevel = 0;
+      item.meta.upgradeLevel = parseInt(item.meta.upgradeLevel) + 1;
+      item.name = newName;
+
+      if (!item.params) item.params = [0,0,0,0,0,0,0,0];
+      if (DataManager.isWeapon(item)) item.params[2] += 2;
+      if (DataManager.isArmor(item)) item.params[3] += 2;
+
+      $gameParty.loseGold(cost);
+      for (const req of requiredItems) {
+        $gameParty.loseItem($dataItems[req.id], req.amount);
+      }
+
+      SoundManager.playEquip();
+      this._confirmWindow.setText(`Upgraded: ${item.name} (-${cost}G)`);
+      this._itemWindow.refresh();
+      this._infoWindow.setItem(null);
+      this._itemWindow.activate();
+    }
+
+    getUpgradeLevel(item) {
+      if (item && item.meta.upgradeLevel) return parseInt(item.meta.upgradeLevel);
+      const match = item.name.match(/\+(\d+)$/);
+      return match ? parseInt(match[1]) : 0;
+    }
+
+    getUpgradeCost(item, level) {
+      const note = item.note || "";
+      const tag = new RegExp(`<upgradeCost${level}:(\\d+)>`, "i");
+      const match = note.match(tag);
+      if (match) return parseInt(match[1]);
+      return level * 100;
+    }
+
+    getUpgradeItems(item, level) {
+      const note = item.note || "";
+      const tag = new RegExp(`<upgradeItem${level}:(\\d+),(\\d+)>`, "gi");
+      const matches = [];
+      let result;
+      while ((result = tag.exec(note)) !== null) {
+        matches.push({ id: parseInt(result[1]), amount: parseInt(result[2]) });
+      }
+      return matches;
+    }
+  }
+
+  class Window_ForgeCategoryList extends Window_Selectable {
+    initialize(rect) {
+      super.initialize(rect);
+      this._infoWindow = null;
+      this._categories = ["Weapon", "Shield", "Armor", "Head", "Accessory"];
+      this._expanded = {};
+      this.refresh();
+      this.select(0); // dopiero po zbudowaniu listy
+
+    }
+
+    setInfoWindow(win) {
+      this._infoWindow = win;
+    }
+
+    maxItems() {
+      return this._displayList.length;
+    }
+
+    item() {
+      const entry = this._displayList[this.index()];
+      return entry && entry.item ? entry.item : null;
+    }
+
+    refresh() {
+      this._data = this.buildItemTree();
+      this._displayList = this.flattenTree(this._data);
+      this.createContents();
+      this.drawAllItems();
+    }
+
+    buildItemTree() {
+      const partyItems = $gameParty.allItems();
+      const equippedItems = $gameParty.members().flatMap(actor => actor.equips().filter(Boolean));
+      const items = [...partyItems, ...equippedItems];
+      const map = {};
+      for (const cat of this._categories) map[cat] = [];
+
+      for (const item of items) {
+        if (DataManager.isWeapon(item)) map["Weapon"].push(item);
+        else if (DataManager.isArmor(item)) {
+          // Sprawdź tag <forgeCategory:Nazwa>
+          const note = item.note || "";
+          const tag = note.match(/<forgeCategory:(.+?)>/i);
+          const type = tag ? tag[1].trim() : $dataSystem.equipTypes[item.etypeId];
+        
+          if (map[type]) map[type].push(item);
+        }
+        
+      }
+      return map;
+    }
+
+    flattenTree(map) {
+      const list = [];
+      for (const cat of this._categories) {
+        list.push({ category: cat, isHeader: true });
+        if (this._expanded[cat]) {
+          for (const item of map[cat]) {
+            list.push({ item, isHeader: false });
+          }
+        }
+      }
+      return list;
+    }
+
+    drawItem(index) {
+      const entry = this._displayList[index];
+      const rect = this.itemRect(index);
+      this.resetTextColor();
+      this.changePaintOpacity(true);
+
+      if (entry.isHeader) {
+        const symbol = this._expanded[entry.category] ? " -" : " +";
+        this.changeTextColor(ColorManager.textColor(12)); // 6 = pomarańczowy
+        this.drawText(`${symbol} ${entry.category}`, rect.x, rect.y, rect.width);
+        this.resetTextColor(); // przywróć kolor do normalnego
+      }
+       else {
+        this.drawText(entry.item.name, rect.x + 12, rect.y, rect.width - 12);
+        let count = $gameParty.numItems(entry.item);
+
+// Dodaj 1 za każdą wyekwipowaną kopię
+for (const actor of $gameParty.members()) {
+  for (const equip of actor.equips()) {
+    if (equip && equip.id === entry.item.id &&
+        equip.etypeId === entry.item.etypeId &&
+        equip.wtypeId === entry.item.wtypeId) {
+      count++;
+    }
+  }
+}
+
+this.drawText("x" + count, rect.x, rect.y, rect.width, "right");
+
+      }
+    }
+
+    processOk() {
+      const entry = this._displayList[this.index()];
+      if (entry.isHeader) {
+        const cat = entry.category;
+        this._expanded[cat] = !this._expanded[cat];
+        const currentIndex = this.index(); // 🧠 zapamiętujemy
+        this.refresh();
+        this.select(Math.min(currentIndex, this.maxItems() - 1)); // 👈 wracamy tam, gdzie byliśmy
+      } else {
+        super.processOk();
+      }
+    }
+    
+
+    select(index) {
+      super.select(index);
+      if (!this._displayList || this._displayList.length === 0) return;
+    
+      const entry = this._displayList[index];
+      if (this._infoWindow && entry && entry.item) {
+        this._infoWindow.setItem(entry.item);
+      } else if (this._infoWindow) {
+        this._infoWindow.setItem(null);
+      }
+    }
+    
+  }
+
+  class Window_ForgeItemList extends Window_ItemList {
+      setInfoWindow(infoWindow) {
+        this._infoWindow = infoWindow;
+      }
+    
+      includes(item) {
+        return DataManager.isWeapon(item) || DataManager.isArmor(item);
+      }
+    
+      makeItemList() {
+        const items = [];
+    
+        // Z ekwipunku
+        const allItems = $gameParty.allItems();
+        console.log("===> Party items:");
+        for (const item of allItems) {
+          if (this.includes(item)) {
+            console.log("Z ekwipunku:", item.name);
+            items.push(item);
+          }
+        }
+    
+        // Wyposażenie postaci
+        console.log("===> Wyposażone:");
+        for (const actor of $gameParty.members()) {
+          console.log("Aktor:", actor.name());
+          for (const equip of actor.equips()) {
+            if (equip) {
+              console.log("  Wyekwipowane:", equip.name);
+              if (!items.includes(equip)) {
+                items.push(equip);
+              }
+            }
+          }
+        }
+        
+    
+        this._data = items;
+        console.log("===> Łącznie przedmiotów:", items.length);
+      }
+
+      item() {
+          return this._data && this.index() >= 0 ? this._data[this.index()] : null;
+        }
+        
+    
+      select(index) {
+        super.select(index);
+        if (this._infoWindow) this._infoWindow.setItem(this.item());
+      }
+
+      isEnabled(item) {
+          return true;
+        }
+      
+        drawItemNumber(item, x, y, width) {
+          const isWeapon = DataManager.isWeapon(item);
+          const isArmor = DataManager.isArmor(item);
+        
+          let count = $gameParty.numItems(item);
+        
+          for (const actor of $gameParty.members()) {
+            for (const equip of actor.equips()) {
+              if (!equip) continue;
+              if (
+                ((isWeapon && DataManager.isWeapon(equip)) ||
+                 (isArmor && DataManager.isArmor(equip))) &&
+                equip.id === item.id
+              ) {
+                count += 1;
+              }
+            }
+          }
+        
+          this.drawText("x" + count, x, y, width, "right");
+        }
+        
+        
+        
+    }
+    
+    
+    
+
+  class Window_ForgeInfo extends Window_Base {
+    initialize(rect) {
+      super.initialize(rect);
+      this._item = null;
+    }
+
+    setItem(item) {
+      this._item = item;
+      this.refresh();
+    }
+
+    refresh() {
+      this.contents.clear();
+      if (!this._item) return;
+    
+      const level = this.getUpgradeLevel(this._item);
+      const cost = SceneManager._scene.getUpgradeCost(this._item, level + 1);
+      const requirements = SceneManager._scene.getUpgradeItems(this._item, level + 1);
+    
+      const name = this._item.name;
+      const type = DataManager.isWeapon(this._item) ? "Weapon" : "Armor";
+      const param = DataManager.isWeapon(this._item) ? "ATK" : "DEF";
+      const base = DataManager.isWeapon(this._item) ? this._item.params[2] : this._item.params[3];
+      const bonus = level * 2;
+    
+      this.drawText(`${name}`, 0, 0, this.width - 20);
+      this.drawText(`Type: ${type}`, 0, 30, this.width - 20);
+      this.drawText(`Level: +${level}`, 0, 60, this.width - 20);
+      this.drawText(`${param}: ${base} (+${bonus})`, 0, 90, this.width - 20);
+      this.drawText("Requirements:", 0, 120, this.width - 20);
+
+     let y = 150; // 🔽 tu zaczynamy rysowanie złota
+     const gold = $gameParty.gold();
+     this.changeTextColor(gold < cost ? ColorManager.textColor(18) : ColorManager.normalColor());
+     this.drawText(`   Gold: ${cost}G`, 0, y, this.width - 20);
+     this.resetTextColor();
+
+y += 30; // 🔼 a potem kolejne przedmioty
+
+
+      for (const req of requirements) {
+        const item = $dataItems[req.id];
+        const have = $gameParty.numItems(item);
+        const text = `   ${item.name}: ${have}/${req.amount}`;
+        this.changeTextColor(have < req.amount ? ColorManager.textColor(18) : ColorManager.normalColor());
+        this.drawText(text, 0, y, this.width - 20);
+        y += 30;
+      }
+      this.resetTextColor();
+    
+
+    }
+    
+
+    getUpgradeLevel(item) {
+      if (item && item.meta.upgradeLevel) return parseInt(item.meta.upgradeLevel);
+      const match = item.name.match(/\+(\d+)$/);
+      return match ? parseInt(match[1]) : 0;
+    }
+  }
+})();
